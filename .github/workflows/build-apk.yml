@@ -1,23 +1,35 @@
-name: Build APK
+name: Crear APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: unzip -q ./*.zip
-      - uses: actions/setup-java@v4
+      - name: Descomprimir zips
+        run: for z in ./*.zip; do unzip -q -o "$z"; done
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: 17 }
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: 8.7 }
-      - run: bash SquirrellySummer/scripts/fetch_ruffle.sh
-      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - run: gradle -p SquirrellySummer assembleDebug --no-daemon
+      - name: Aceptar licencias de Android
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Compilar proyectos
+        shell: bash
+        run: |
+          mkdir -p apks
+          while read -r d; do
+            name=$(basename "$d")
+            echo "== $name =="
+            bash "$d/scripts/fetch_ruffle.sh"
+            gradle -p "$d" assembleDebug --no-daemon
+            cp "$d/app/build/outputs/apk/debug/app-debug.apk" "apks/$name.apk"
+          done < <(find . -maxdepth 2 -name settings.gradle -not -path './.git/*' -printf '%h\n')
       - uses: actions/upload-artifact@v4
         with:
-          name: SquirrellySummer-apk
-          path: SquirrellySummer/app/build/outputs/apk/debug/app-debug.apk
+          name: APKs
+          path: apks/*.apk
