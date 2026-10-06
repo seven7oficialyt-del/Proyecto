@@ -1,0 +1,56 @@
+name: Build APK (nuevo)
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: 8.7
+
+      - name: Descomprimir el zip y buscar el proyecto
+        id: find
+        run: |
+          mkdir -p /tmp/work
+          # Si hay un zip en el repo, se descomprime; si no, se usa el repo tal cual
+          if ls *.zip >/dev/null 2>&1; then
+            for z in *.zip; do unzip -q -o "$z" -d /tmp/work; done
+          else
+            cp -r . /tmp/work/
+          fi
+          echo "Archivos descomprimidos:"
+          find /tmp/work -type f | head -50
+          S=$(find /tmp/work \( -name settings.gradle.kts -o -name settings.gradle \) | head -1)
+          if [ -z "$S" ]; then
+            echo "::error::No se encontro settings.gradle.kts dentro del zip."
+            exit 1
+          fi
+          DIR=$(dirname "$S")
+          echo "Proyecto encontrado en: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar APK (debug)
+        run: gradle -p "${{ steps.find.outputs.dir }}" assembleDebug --no-daemon
+
+      - name: Reunir el APK
+        run: |
+          mkdir -p apks
+          find "${{ steps.find.outputs.dir }}" -path "*/outputs/apk/debug/*.apk" -exec cp {} apks/ \;
+          ls -la apks
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: juego-apk
+          path: apks/*.apk
+          if-no-files-found: error
