@@ -1,35 +1,79 @@
-name: Crear APK
+name: Build y firmar APK
+
 on:
   push:
-    branches: [main]
+    paths:
+      - '*.zip'
+      - '*.apk'
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Descomprimir zips
-        run: for z in ./*.zip; do unzip -q -o "$z"; done
-      - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: 17 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: 8.7 }
-      - name: Aceptar licencias de Android
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - name: Compilar proyectos
-        shell: bash
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Descargar apktool
+        run: curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+
+      - name: Procesar y firmar
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD || 'android123' }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS || 'mykey' }}
         run: |
-          mkdir -p apks
-          while read -r d; do
-            name=$(basename "$d")
-            echo "== $name =="
-            if [ -f "$d/scripts/fetch_ruffle.sh" ]; then bash "$d/scripts/fetch_ruffle.sh"; fi
-            gradle -p "$d" assembleDebug --no-daemon
-            cp "$d/app/build/outputs/apk/debug/app-debug.apk" "apks/$name.apk"
-          done < <(find . -maxdepth 2 -name settings.gradle -not -path './.git/*' -printf '%h\n')
+          set -e
+          ROOT="$PWD"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          export PATH="$BT:$PATH"
+          mkdir -p out
+
+          # Keystore: el de los secrets, o uno nuevo si no hay
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > ks.jks
+          else
+            echo "::warning::Sin KEYSTORE_BASE64: se crea una firma nueva (cambiará en cada ejecución)"
+            keytool -genkeypair -keystore ks.jks -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=App"
+          fi
+
+          for f in *.zip *.apk; do
+            [ -e "$f" ] || continue
+            name=$(basename "${f%.*}")
+            echo "=== $name ==="
+            rm -rf work unsigned.apk aligned.apk
+            mkdir work
+            unzip -q "$f" -d work
+
+            # Si el zip trae una sola carpeta dentro, entrar en ella
+            dir=work
+            if [ ! -f work/apktool.yml ] && [ ! -f work/AndroidManifest.xml ] && [ "$(ls work | wc -l)" -eq 1 ]; then
+              dir="work/$(ls work)"
+            fi
+
+            if [ -f "$dir/apktool.yml" ]; then
+              # APK decompilado con apktool
+              java -jar apktool.jar b "$dir" -o unsigned.apk
+            else
+              # Contenido de APK descomprimido: quitar firma vieja y reempaquetar
+              rm -rf "$dir/META-INF"
+              (cd "$dir" && zip -qr -X "$ROOT/unsigned.apk" . -x resources.arsc \
+                && { [ ! -f resources.arsc ] || zip -q0 -X "$ROOT/unsigned.apk" resources.arsc; })
+            fi
+
+            zipalign -p -f 4 unsigned.apk aligned.apk
+            apksigner sign --ks ks.jks --ks-key-alias "$KS_ALIAS" \
+              --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
+              --out "out/$name-signed.apk" aligned.apk
+            apksigner verify "out/$name-signed.apk"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
-          name: APKs
-          path: apks/*.apk
+          name: apks-firmados
+          path: out/*.apk
