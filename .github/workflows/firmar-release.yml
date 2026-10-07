@@ -1,0 +1,91 @@
+name: Firmar APK desde Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag del release a firmar'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Descargar APK/zip del release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release download "$TAG" --pattern '*.apk' --pattern '*.zip' --dir . --repo "${{ github.repository }}"
+
+      - name: Descargar apktool
+        run: curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+
+      - name: Procesar y firmar
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD || 'android123' }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS || 'mykey' }}
+        run: |
+          set -e
+          ROOT="$PWD"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          export PATH="$BT:$PATH"
+          mkdir -p out
+
+          # Keystore: el de los secrets, o uno nuevo si no hay
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > ks.jks
+          else
+            echo "::warning::Sin KEYSTORE_BASE64: se crea una firma nueva (cambiará en cada ejecución)"
+            keytool -genkeypair -keystore ks.jks -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=App"
+          fi
+
+          for f in *.zip *.apk; do
+            [ -e "$f" ] || continue
+            name=$(basename "${f%.*}")
+            echo "=== $name ==="
+            rm -rf work unsigned.apk aligned.apk
+            mkdir work
+            unzip -q "$f" -d work
+
+            # Si el zip trae una sola carpeta dentro, entrar en ella
+            dir=work
+            if [ ! -f work/apktool.yml ] && [ ! -f work/AndroidManifest.xml ] && [ "$(ls work | wc -l)" -eq 1 ]; then
+              dir="work/$(ls work)"
+            fi
+
+            if [ -f "$dir/apktool.yml" ]; then
+              # APK decompilado con apktool
+              java -jar apktool.jar b "$dir" -o unsigned.apk
+            else
+              # Contenido de APK descomprimido: quitar firma vieja y reempaquetar
+              rm -rf "$dir/META-INF"
+              (cd "$dir" && zip -qr -X "$ROOT/unsigned.apk" . -x resources.arsc \
+                && { [ ! -f resources.arsc ] || zip -q0 -X "$ROOT/unsigned.apk" resources.arsc; })
+            fi
+
+            zipalign -p -f 4 unsigned.apk aligned.apk
+            apksigner sign --ks ks.jks --ks-key-alias "$KS_ALIAS" \
+              --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
+              --out "out/$name-signed.apk" aligned.apk
+            apksigner verify "out/$name-signed.apk"
+          done
+
+      - name: Subir APK firmados al release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" out/*.apk --clobber --repo "${{ github.repository }}"
