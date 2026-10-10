@@ -1,0 +1,70 @@
+name: Build HackROM Fork (APK propio)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'love/**'
+      - 'base-apk/**'
+      - '.github/workflows/build-hackrom-fork.yml'
+
+concurrency:
+  group: hackrom-fork-build
+  cancel-in-progress: true
+
+jobs:
+  build-fork:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Comprobar sintaxis de los archivos Lua modificados
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y luajit zip
+          if [ ! -f ci/modified_files.txt ]; then
+            echo "ci/modified_files.txt no existe: se omite la comprobacion"
+            exit 0
+          fi
+          fail=0
+          while read -r f; do
+            [ -z "$f" ] && continue
+            if ! luajit -bl "$f" > /dev/null 2> /tmp/lua_err.txt; then
+              echo "::error file=$f::Error de sintaxis Lua"
+              cat /tmp/lua_err.txt
+              fail=1
+            fi
+          done < ci/modified_files.txt
+          exit $fail
+
+      - name: Reconstruir el APK base
+        run: cat base-apk/base.apk.part* > base.apk
+
+      - name: Empaquetar el juego (game.love)
+        run: |
+          cd love
+          zip -9 -r -q ../game.love . -x "*.DS_Store"
+
+      - name: Insertar game.love en el APK
+        run: |
+          mkdir -p stage/assets
+          cp game.love stage/assets/game.love
+          cp base.apk unsigned.apk
+          (cd stage && zip -0 -q ../unsigned.apk assets/game.love)
+
+      - name: Alinear y firmar
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/zipalign" -p -f 4 unsigned.apk aligned.apk
+          "$BT/apksigner" sign --min-sdk-version 23 \
+            --ks hackrom.keystore --ks-pass pass:hackrom123 \
+            --key-pass pass:hackrom123 --ks-key-alias hackrom \
+            --out HackROM-Fork.apk aligned.apk
+          "$BT/apksigner" verify HackROM-Fork.apk
+
+      - name: Subir el APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HackROM-Fork-apk
+          path: HackROM-Fork.apk
