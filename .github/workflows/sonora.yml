@@ -72,6 +72,32 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Cache de Gradle (builds siguientes mas rapidos)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Forzar Android SDK nuevo en todas las librerias
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/sonora-sdk.gradle << 'GRADLE'
+          allprojects {
+              afterEvaluate { p ->
+                  if (p.plugins.hasPlugin('com.android.library') || p.plugins.hasPlugin('com.android.application')) {
+                      def want = (System.getenv('SONORA_SDK') ?: '36') as Integer
+                      def cur = p.android.compileSdk ?: 0
+                      if (cur < want) {
+                          p.android.compileSdk = want
+                      }
+                  }
+              }
+          }
+          GRADLE
+
       - name: Compilar y firmar
         run: |
           cd "$APP_DIR"
@@ -82,7 +108,7 @@ jobs:
           dart run flutter_launcher_icons
 
           build() {
-            flutter build apk --release \
+            flutter build apk --release --target-platform android-arm64 \
               --build-number=${{ github.run_number }} \
               --build-name=1.0.${{ github.run_number }} 2>&1 | tee build.log
             return ${PIPESTATUS[0]}
@@ -94,7 +120,7 @@ jobs:
             V=$(grep -oE "compile against version [0-9]+" build.log | grep -oE "[0-9]+" | sort -n | tail -1 || true)
             if [ -z "$V" ]; then break; fi
             echo "Subiendo compileSdk a $V y reintentando..."
-            sed -i -E "s/compileSdk(Version)?( *=)? *(flutter\.compileSdkVersion|[0-9]+)/compileSdk = $V/" android/app/build.gradle*
+            export SONORA_SDK=$V
           done
           [ "$ok" = 1 ] || exit 1
 
